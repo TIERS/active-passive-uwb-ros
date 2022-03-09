@@ -28,7 +28,9 @@
 
         <!-- SUBSCRIBER Topic format for tof data (distances) -->
         <param name="uwb_tof_topic_format" value="/uwb/tof/{}/{}/distance"/>
-        
+
+        <!-- PUBLISHER format for the positions computed from TOF -->
+        <param name="uwb_tof_pub_topic_format" value="/uwb/anchor/{}/pose"/>
 
     </node>
 
