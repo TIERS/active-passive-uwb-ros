@@ -1,0 +1,35 @@
+<launch>
+
+    <node name="tof_positioning" pkg="uwb_tests" type="positioning" respawn="true" output="screen">
+        <!-- Remaping of Optitrack positions to anchor mocap positions -->
+        <remap from="/uwb/anchor/mocap/1/pose"  to="/vrpn_client_node/uwb01/pose" />
+        <remap from="/uwb/anchor/mocap/2/pose"  to="/vrpn_client_node/opti02/pose" />
+        <remap from="/uwb/anchor/mocap/3/pose"  to="/vrpn_client_node/uwb03/pose" />
+        <remap from="/uwb/anchor/mocap/4/pose"  to="/vrpn_client_node/uwb04/pose" />
+        <remap from="/uwb/anchor/mocap/5/pose"  to="/vrpn_client_node/uwb05/pose" />
+        <remap from="/uwb/anchor/mocap/6/pose"  to="/vrpn_client_node/uwb06/pose" />
+
+        <!-- Parameters for the positioning node init -->
+
+        <!-- Calibrated UWB offset -->
+        <param name="uwb_range_offset" value="0.2" />
+
+        <!-- Max time delay for the reception of messages -->
+        <param name="max_pos_delay" value="0.2" />
+
+        <!-- Minimum number for the node ID allowed -->
+        <param name="uwb_min_id" value="1" />
+
+        <!-- Control printing of information -->
+        <param name="verbose" value="True" />
+
+        <!-- Number of nodes in the sequence for TOF (Nodes in the network) -->
+        <param name="number_tof_nodes" value="6" />
+
+        <!-- SUBSCRIBER Topic format for tof data (distances) -->
+        <param name="uwb_tof_topic_format" value="/uwb/tof/{}/{}/distance"/>
+        
+
+    </node>
+
+</launch>
