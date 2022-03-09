@@ -1,0 +1,142 @@
+#!/usr/bin/env python
+""" For more info on the documentation go to https://www.decawave.com/sites/default/files/dwm1001-api-guide.pdf
+"""
+
+__author__     = "Paola Torrico"
+__version__    = "0.1"
+__maintainer__ = "Paola Torrico"
+__email__      = "pctomo@utu.fi"
+__status__     = "Development"
+
+
+import rospy, time, serial
+
+from sensor_msgs.msg    import Range
+
+class dwm1001_localizer:
+
+    def __init__(self) :
+        """
+        Initialize the node, open serial port
+        """
+
+	    # Init node
+        rospy.init_node('listener_interface', anonymous=True)
+
+        # Listerner NODE ID, node that computes the diff distances
+        self.listener_id = rospy.get_param('~listener_id', 5)
+        # Control printing of information
+        self.verbose = rospy.get_param('~verbose', False)
+        # Port of passive UWB node
+        self.dwm_port = rospy.get_param('~port', '/dev/ttyACM0')
+        # PUBLISHER topic formats for TOF and TDOA information
+        self.uwb_tof_topic_format= rospy.get_param('~uwb_tof_topic_format', '/uwb/tof/{}/distance')
+        self.uwb_tdoa_topic_format= rospy.get_param('~uwb_tdoa_topic_format','/uwb/{}/tdoa/{}/distance')
+
+        # Set a ROS rate
+        self.rate = rospy.Rate(1)
+        
+        # Empty dictionary to store topics being published
+        self.topics = {}
+        
+        # Serial port settings
+        self.serialPortDWM1001 = serial.Serial(
+            port = self.dwm_port,
+            #port = '/dev/ttyACM0',
+            baudrate = 115200,
+            parity = serial.PARITY_ODD,
+            stopbits = serial.STOPBITS_TWO,
+            bytesize = serial.SEVENBITS
+        )
+
+        
+    
+
+    def main(self) :
+        """
+        Initialize port and dwm1001 api
+        :param:
+        :returns: none
+        """
+
+        # close the serial port in case the previous run didn't closed it properly
+        self.serialPortDWM1001.close()
+        # sleep for one sec
+        time.sleep(1)
+        # open serial port
+        self.serialPortDWM1001.open()
+
+        # check if the serial port is opened
+        if(self.serialPortDWM1001.isOpen()):
+            rospy.loginfo("Port opened: "+ str(self.serialPortDWM1001.name) )
+            # start sending commands to the board so we can initialize the board
+        else:
+            rospy.loginfo("Can't open port: "+ str(self.serialPortDWM1001.name))
+
+        try:
+
+            while not rospy.is_shutdown():
+                # just read everything from serial port
+                serialReadLine = self.serialPortDWM1001.read_until()
+                try:
+                    self.publishAnchorDistances(serialReadLine)
+
+                except IndexError:
+                    rospy.loginfo("Found index error in the network array! DO SOMETHING!")
+
+
+
+        except KeyboardInterrupt:
+            rospy.loginfo("Quitting DWM1001 Shell Mode and closing port, allow 1 second for UWB recovery")
+
+        finally:
+            rospy.loginfo("Quitting, and sending reset command to dev board")
+            self.serialPortDWM1001.close()
+
+
+    def publishAnchorDistances(self, serialData):
+        """
+        Publish anchors and tag in topics using Tag and Anchor Object
+        :param networkDataArray:  Array from serial port containing all informations, tag xyz and anchor xyz
+        :returns: none
+        """
+
+        arrayData = [x.strip() for x in serialData.strip().split(';')]
+        #print(arrayData)
+
+        if len(arrayData) is not 6 :
+            rospy.logerr("Wrong number of elements: {}".format(arrayData))
+            return
+
+        nodes = [arrayData[0]+"/"+arrayData[1], arrayData[1]+"/"+arrayData[0]]
+
+        for idx, node in enumerate(nodes) :
+            if node not in self.topics:
+                tof_topic = self.uwb_tof_topic_format.format(node)
+                tdoa_topic = self.uwb_tdoa_topic_format.format(self.listener_id, node)
+                print("Creating new publishers for {} and {}".format(tof_topic, tdoa_topic))
+                self.topics[node] = rospy.Publisher(tof_topic, Range, queue_size=100)
+                self.topics["{}/{}/tdoa".format(self.listener_id, node)] = rospy.Publisher(tdoa_topic, Range, queue_size=100)
+
+            r = Range()
+            r.header.stamp = rospy.Time.now()
+            r.range = float(arrayData[2+idx])
+            self.topics[node].publish(r)
+
+            if self.verbose :
+                rospy.loginfo("Publishing {} to {}".format(r.range, node))
+
+            r.range = float(arrayData[4+idx])
+            self.topics["{}/{}/tdoa".format(self.listener_id, node)].publish(r)
+
+            if self.verbose :
+                rospy.loginfo("Publishing {} to {}".format(r.range, node+"/tof"))
+       
+
+if __name__ == '__main__':
+    try:
+        dwm1001 = dwm1001_localizer()
+        dwm1001.main()
+        rospy.spin()
+    except rospy.ROSInterruptException:
+        pass
