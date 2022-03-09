@@ -1,0 +1,285 @@
+#!/usr/bin/env python
+import itertools
+import numpy as np
+import rospy
+import json
+import time
+from operator import itemgetter
+
+from geometry_msgs.msg  import PoseStamped
+from std_msgs.msg import String
+
+class node_select:
+    """
+        TODO Docstring
+    """
+
+    def __init__(self) :
+        """
+        Initialize the node, open serial port
+        """
+
+        # Init node
+        rospy.init_node('Node_selector', anonymous = True)
+
+        # Max post delay for the subscribed topics
+        self.max_pos_delay = rospy.get_param("~max_pos_delay", 0.2)
+
+        # Number of nodes in the sequence for TOF (Nodes in the network)
+        self.total_num_uwb =  rospy.get_param("~total_uwb", 6)
+
+        # Number of active nodes on network
+        self.num_node_tof = rospy.get_param("~num_node_tof", 4)
+
+        # Number of nodes doing TDOA
+        self.num_node_listener = rospy.get_param("~num_node_listener", 2)
+
+        # Nodes to be considered for centroid (Triangle)
+        self.nodes_considered=rospy.get_param("~nodes_considered", 3)
+
+        # Minimum number of node ID
+        self.uwb_min_id = rospy.get_param("~uwb_min_id", 1)
+
+        # Flag for active node select or not
+        self.fixed_anchors_flag = rospy.get_param("~fixed_anchors_flag",True)
+
+        # Control printing of information
+        self.verbose = rospy.get_param('~verbose', True)
+
+        # SUBSCRIBER Topic format for active node positions
+        self.uwb_anchor_pose_topic_format = rospy.get_param("~uwb_anchor_pose", "/uwb/anchor/{}/pose")
+        
+        # SUBSCRIBER Topic format for passive node positions
+        self.uwb_listener_pose_topic_format = rospy.get_param("~uwb_listener_pose", "/uwb/listener/{}/pose")
+
+        # BOTH OF SAME LENGTH !!!!
+        self.anchor_poses = []
+        self.anchor_stamps = []
+        self.listener_poses = []
+        self.listener_stamps = []
+
+        self.anchor_poses_flag = []
+        self.listener_poses_flags =[]
+
+        self.anchor_poses_flag = [False for _ in range(self.total_num_uwb)]
+        self.listener_poses_flags = [False for _ in range(self.total_num_uwb)]
+
+        self.anchor_poses = [PoseStamped().pose.position for _ in range(self.total_num_uwb)]
+        self.anchor_stamps = [rospy.Time() for _ in range(self.total_num_uwb)]
+        self.listener_poses = [PoseStamped().pose.position for _ in range(self.total_num_uwb)]
+        self.listener_stamps = [rospy.Time() for _ in range(self.total_num_uwb)]
+
+        self.node_id = [k for k in range(self.total_num_uwb)]
+
+        # UWB Callbacks Anchors
+        self.uwb_anchor_pose_subs = [None for _ in range(self.total_num_uwb)]
+        for i in range(self.uwb_min_id, self.total_num_uwb+1) :
+            self.uwb_anchor_pose_subs[i-self.uwb_min_id] = rospy.Subscriber(self.uwb_anchor_pose_topic_format.format(i), PoseStamped, self.get_anchor_pose, i-1)
+            
+        # UWB Callbacks listeners
+        self.uwb_listener_pose_subs = [None for _ in range(self.total_num_uwb)]
+        for i in range(self.uwb_min_id, self.total_num_uwb+1) :
+            self.uwb_listener_pose_subs[i-self.uwb_min_id] = rospy.Subscriber(self.uwb_listener_pose_topic_format.format(i), PoseStamped, self.get_listener_pose, i-1)
+
+        # UWB Publishers
+        # PUBLISHER of list of active nodes
+        self.uwb_selected_anchors_format = rospy.get_param("~uwb_selected_anchors_format", "/uwb/anchor/nodes")
+        # PUBLISHER of list of passive nodes
+        self.uwb_selected_listeners_format = rospy.get_param("~uwb_selected_listeners_format", "/uwb/listener/nodes")
+        #Initialization of publishers
+        self.uwb_selected_anchors_publisher = rospy.Publisher(
+                    self.uwb_selected_anchors_format,
+                    String,
+                    queue_size=10
+                )
+        self.uwb_selected_listener_publisher = rospy.Publisher(
+                    self.uwb_selected_listeners_format,
+                    String,
+                    queue_size=10
+                )
+
+        # SET role nodes if it is not actives
+        self.anchor_node_selection=[1,2,4,6]
+        self.listener_node_selection=[3,5]
+
+
+    def get_anchor_pose(self,msg,ids):
+        '''
+            Update UWB anchor postions
+        '''        
+        # print("################anchor pose")
+
+        self.anchor_poses_flag[ids]=True
+        self.anchor_poses[ids]=msg.pose.position  
+        self.anchor_stamps[ids] = msg.header.stamp 
+
+        # print("id {}, msg {}".format(ids+1,msg.pose.position))
+        
+
+    def get_listener_pose(self,msg,ids):   
+        '''
+            Update UWB listener postions
+        '''        
+        # print("lisnener pose")
+        self.listener_poses_flags[ids]=True
+        self.listener_poses[ids]=msg.pose.position      
+        self.listener_stamps[ids] = msg.header.stamp 
+
+        
+    def node_selection_func(self,target):
+        '''
+            Function that selects the active and passive nodes
+            It consideres the amount of nodes doing TOF and TDOA
+            Uses triangles for centroid
+        '''
+
+        self.num_node_tof
+        self.num_node_listener
+
+        if(self.fixed_anchors_flag):
+            if(self.verbose):
+                rospy.logwarn("NODE SELECTION Active")
+
+            self.uwb_node_positions = []
+
+            for idx in range(len(self.anchor_poses)) :
+
+                if True : #(idx+1) in self.anchor_node_selection :
+                    self.uwb_node_positions.append(np.array([
+                        self.anchor_poses[idx].x,
+                        self.anchor_poses[idx].y
+                    ]))
+
+                continue # TODO remove !!!!!
+
+                if (idx+1) in self.listener_node_selection :
+                    self.uwb_node_positions.append(np.array([
+                        self.listener_poses[idx].x,
+                        self.listener_poses[idx].y
+                    ]))
+
+            anchors_err = []
+
+            #All combinations of four nodes
+            for anchors in itertools.combinations(self.node_id, self.num_node_tof):
+
+                #List of selected anchors
+                anchors=list(anchors)
+                #print(anchors)
+
+                #List of nodes doing tdoa (remaining nodes)
+                tdoa_nodes=list(set(self.node_id)-set(anchors))
+                #print (tdoa_nodes)
+
+                #Reset the error for this set of anchor nodes
+                error=0
+
+                #All possible combinations of triangles for the four nodes 
+                for triangle in itertools.combinations(anchors, self.nodes_considered):
+                    triangle=list(triangle)    
+                    #print("centroid")
+                    #print(triangle)
+
+                    #Position for node in triangle
+                    x1=self.uwb_node_positions[triangle[0]][0]
+                    x2=self.uwb_node_positions[triangle[1]][0]
+                    x3=self.uwb_node_positions[triangle[2]][0]
+
+                    y1=self.uwb_node_positions[triangle[0]][1]
+                    y2=self.uwb_node_positions[triangle[1]][1]
+                    y3=self.uwb_node_positions[triangle[2]][1]
+
+                    #Compute the node of the triangle (centroid)
+                    centroid_pos = [(x1+x2+x3)/3,(y1+y2+y3)/3]
+                    #print(centroid_pos)
+
+                    #Computing errors to center of triangle
+                    for node in tdoa_nodes:
+
+                        #Individual error of a node to the centroid 
+                        err = np.linalg.norm(np.array(centroid_pos)-np.array(self.uwb_node_positions[node]))
+
+                        #Error for each of the nodes in the different combination of anchors
+                        error = err + error
+
+                        #print("Anchors {} Triangle {} Node {} Err {} Error {}".format(anchors, triangle, node, err, error))
+
+                #Appending the anchors an the total error
+                anchors_err.append([anchors, tdoa_nodes, error])
+
+            #Print sorting in ascending with based on the accumulated errors
+            anchors_err=sorted(anchors_err, key=itemgetter(2), reverse=False)
+
+            self.anchor_node_selection=[]
+            self.listener_node_selection=[]
+
+            self.anchor_node_selection=np.array(anchors_err[0][0])+1
+            self.listener_node_selection=np.array(anchors_err[0][1])+1
+            if(self.verbose):
+               
+               rospy.loginfo("anchors {}, listener {}, error {}".format(self.anchor_node_selection, self.listener_node_selection, anchors_err[0][2]))
+            self.uwb_selected_anchors_publisher.publish(json.dumps(list(self.anchor_node_selection)))
+            self.uwb_selected_listener_publisher.publish(json.dumps(list(self.listener_node_selection)))
+
+        else:
+
+            if(self.verbose):
+                rospy.logwarn("FIXE NODE SELECTION")
+
+            # #Set them to fix anchors
+            self.anchor_node_selection=[1,2,3,5]
+            self.listener_node_selection=[4,6]
+
+            if(self.verbose):
+                rospy.loginfo("anchors {}, listener {}".format(self.anchor_node_selection, self.listener_node_selection))
+
+            self.uwb_selected_anchors_publisher.publish(json.dumps(list(self.anchor_node_selection)))
+            self.uwb_selected_listener_publisher.publish(json.dumps(list(self.listener_node_selection)))
+
+
+    def run(self) :
+        '''
+            Initializes timer for node selection function
+        '''
+
+         # Set filter update timer 
+        time.sleep(1)
+        rospy_check_rate = rospy.Rate(10.0)
+        self.node_select_timer = rospy.Timer(rospy.Duration(0.2), self.node_selection_func)
+
+        # Start calculating node selection
+        rospy.loginfo("Starting Node Selection...")
+        try:
+
+            while not rospy.is_shutdown() :             
+                rospy_check_rate.sleep()
+
+        except KeyboardInterrupt :
+            rospy.logerr('Keyboard interrupt')
+
+        self.node_select_timer.shutdown()
+
+
+if __name__ == '__main__':
+    '''
+        Run the node
+    '''
+
+    time.sleep(2)
+
+    # Create new node selector
+    selector = node_select()
+
+    try:
+        selector.run()
+        pass
+
+    except rospy.ROSInterruptException:
+        selector.filter_timer.shutdown()
+        rospy.loginfo("Node selector stopped.")
+
+
+
+
+            
+
