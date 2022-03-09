@@ -1,0 +1,276 @@
+#!/usr/bin/env python
+
+import json
+import time
+import rospy
+import numpy
+
+import matplotlib.pyplot as plt
+
+from std_msgs.msg       import String
+
+from sensor_msgs.msg    import Range
+
+from geometry_msgs.msg  import PoseStamped
+
+class UWBTDoAPositioning():
+    '''
+        ROS Node that takes the fifference of distance between a pair of nodes
+        and calculates the x-y position of each node relative to
+        node 1, the origin of the relative frame. It uses a Least Square Estimator
+    '''
+
+    def __init__(self) :
+        '''
+            Initializatio of the node that computes position using TDOA data
+        '''
+
+        # Init node
+        rospy.init_node('UWB_ToF_Positioning', anonymous = True)
+
+        # Listerner NODE ID, node that computes the diff distances
+        self.listener_id =  rospy.get_param('~listener_id', 5)
+
+        # Calibrated UWB offset
+        self.uwb_range_offset = rospy.get_param("~uwb_range_offset", 0.2)
+
+        # Max time delay for the reception of messages
+        self.max_pos_delay = rospy.get_param("~max_pos_delay", 0.5)
+        
+        # Minimum number for the node ID allowed
+        self.uwb_min_id = rospy.get_param("~uwb_min_id", 1)
+
+        # Control printing of information
+        self.verbose = rospy.get_param('~verbose', True)
+
+        # Number of nodes in the sequence for TOF (Nodes in the network)
+        self.number_tof_nodes = rospy.get_param("~number_tof_nodes", 6)
+
+
+        # Initializing vector postions and flags related
+        self.anchor_position_flag = [True for _ in range(self.number_tof_nodes)]
+        self.anchor_positions = []
+        self.anchor_z = numpy.zeros([self.number_tof_nodes])
+
+
+        # SUBSCRIBER Topic format for tdoa data (difference of distance)
+        self.uwb_tdoa_topic_format = rospy.get_param("~uwb_tdoa_topic_format", "/uwb/{}/tdoa/{}/{}/distance")
+
+        # Initializing vectors to save the informatio of tof and tdoa
+        self.uwb_ranges = numpy.zeros([self.number_tof_nodes, self.number_tof_nodes])
+        self.tdoa_measurements = [[None for _ in range(self.number_tof_nodes)] for _ in range(self.number_tof_nodes)] 
+
+        # Stamps
+        self.uwb_stamps = [rospy.Time() for _ in range(self.number_tof_nodes)]
+        self.tdoa_stamps = [rospy.Time() for _ in range(self.number_tof_nodes)]
+
+        # Anchor positioning
+        # SUBSCRIBER Topic format for active node positions
+        self.uwb_anchor_pose_topic_format = rospy.get_param("~uwb_anchor_pose", "/uwb/anchor/{}/pose")
+        # Initialization of vectors to store active node poses
+        self.anchor_poses = [None for _ in range(self.number_tof_nodes)]
+        self.anchor_pose_msgs = [None for _ in range(self.number_tof_nodes)]
+        self.anchor_stamps = [rospy.Time() for _ in range(self.number_tof_nodes)]
+
+        # UWB Roles
+        # SUBSCRIBER Topic format for list of active nodes
+        self.uwb_selected_anchors_format = rospy.get_param("~uwb_selected_anchors_format", "/uwb/anchor/nodes")
+        self.uwb_role_anchor_subscriber = rospy.Subscriber(self.uwb_selected_anchors_format, String, self.uwb_anchor_role_cb)
+        # SUBSCRIBER Topic format for list of passive nodes
+        self.uwb_selected_listeners_format = rospy.get_param("~uwb_selected_listeners_format", "/uwb/listener/nodes")
+        self.uwb_role_listener_subscriber = rospy.Subscriber(self.uwb_selected_listeners_format, String, self.uwb_listener_role_cb)
+        # Initialization vectors to store list of active and pasive anchors in system
+        self.uwb_role_anchors = list(range(self.uwb_min_id, self.number_tof_nodes+1))       
+        self.uwb_role_listeners = list(range(self.uwb_min_id, self.number_tof_nodes+1))
+
+        # SUBSCRIBER Topic format for mocap node positions    
+        self.uwb_node_pose_mocap_topic_format = rospy.get_param("~uwb_node_mocap_pose", "/uwb/anchor/mocap/{}/pose")
+
+        # UWB Callbacks
+        self.uwb_subs = [[None for _ in range(self.number_tof_nodes)] for _ in range(self.number_tof_nodes)]
+        self.uwb_anchor_pose_subs = [None for _ in range(self.number_tof_nodes)]
+        for i in range(self.uwb_min_id, self.number_tof_nodes+1) :
+            self.uwb_anchor_pose_subs[i-self.uwb_min_id] = rospy.Subscriber(self.uwb_anchor_pose_topic_format.format(i), PoseStamped, self.get_anchor_pose_cb, i-1)
+            for j in range(self.uwb_min_id, self.number_tof_nodes+1) :
+                if i is not j :
+                    self.uwb_subs[i-self.uwb_min_id][j-self.uwb_min_id] = rospy.Subscriber(self.uwb_tdoa_topic_format.format(self.listener_id,i,j), Range, self.uwb_tdoa_cb, (i-self.uwb_min_id, j-self.uwb_min_id))        
+        
+        # UWB Callbacks Nodes Mocap        
+        self.uwb_node_mocap_pose_subs = [None for _ in range(self.number_tof_nodes)]
+        for i in range(self.uwb_min_id, self.number_tof_nodes+1) :
+            self.uwb_node_mocap_pose_subs[i-self.uwb_min_id] = rospy.Subscriber(self.uwb_node_pose_mocap_topic_format.format(i), PoseStamped, self.get_node_mocap_pose_cb, i-1)
+
+
+        # UWB Publishers
+        # PUBLISHER position of passive node position with ID listener_id
+        self.uwb_tdoa_pub_topic_format = rospy.get_param("~uwb_tdoa_pub_topic_format", "/uwb/listener/{}/pose")
+        self.tdoa_publisher = rospy.Publisher(
+                    self.uwb_tdoa_pub_topic_format.format(self.listener_id),
+                    PoseStamped,
+                    queue_size=10
+                )
+
+        
+        # LE Variables
+        self.tdoa_position = None
+        self.le_limitx = None
+        self.le_limity = None
+       
+
+    def get_node_mocap_pose_cb(self,msg,ids):
+        '''
+            Update UWB node mocap positions z
+        ''' 
+        self.anchor_z[ids] = msg.pose.position.z
+        if self.listener_id-1 == ids:
+            self.opti_z = msg.pose.position.z
+
+    def uwb_anchor_role_cb(self, msg) :
+        '''
+            Update List of active nodes on the system
+        ''' 
+        self.uwb_role_anchors = json.loads(msg.data)
+
+    def uwb_listener_role_cb(self, msg) :
+        '''
+            Update List of passive nodes on the system
+        ''' 
+        self.uwb_role_listeners = json.loads(msg.data)
+
+    def get_anchor_pose_cb(self, msg,ids):
+        '''
+            Update UWB anchor postions
+        '''
+        self.anchor_pose_msgs[ids] = msg        
+        self.anchor_poses[ids]=msg.pose.position  
+        self.anchor_stamps[ids] = msg.header.stamp 
+
+        self.anchor_position_flag[ids] = False
+        
+
+    def uwb_tdoa_cb(self, range, ids) :
+        '''
+            Update UWB tdoa measurements (dist to jdx - dist to idx)
+        '''
+        idx, jdx = ids[0], ids[1]
+        if (idx+1) not in self.uwb_role_anchors or (jdx+1) not in self.uwb_role_anchors :
+            self.tdoa_measurements[idx][jdx] = None
+            return
+        if abs(range.range) > 10 :
+            self.tdoa_measurements[idx][jdx] = None
+            return
+        self.tdoa_measurements[idx][jdx] = range.range
+        self.tdoa_stamps[idx] = range.header.stamp 
+
+    def _fill_posestamped(self, array_pos) :
+        '''
+            Set values in array as pose stamp values
+        ''' 
+        pos = PoseStamped()
+        pos.header.stamp = rospy.Time.now()
+        pos.pose.position.x = array_pos[0]
+        pos.pose.position.y = array_pos[1]
+        return pos
+
+    def calculate_tdoa_position(self, target) :
+        '''
+            Caculate tag position based on TDoA scheme
+
+            Simple LE estimator
+        '''
+        start_stamp = time.time()
+
+        min_err = None
+        min_err_pos = [0, 0]
+
+        if self.listener_id in self.uwb_role_anchors :
+            tof_pose = self.anchor_pose_msgs[self.listener_id-1]
+            if tof_pose is not None and rospy.Time.now() - tof_pose.header.stamp < rospy.Duration(self.max_pos_delay) :
+                if (self.verbose):
+                    rospy.loginfo(" I am an anchor now. ")
+                new_pos = self.anchor_pose_msgs[self.listener_id-1]
+
+                self.tdoa_publisher.publish(new_pos)
+            else :
+                if (self.verbose):  
+                    rospy.logerr(" I am an anchor but no ToF position !!!")
+            return
+        
+        if True : 
+            self.le_limitx = (-3, 10)
+            self.le_limity = (-3, 10)
+            self.tdoa_grid_resolution = 0.05
+        else :
+            self.le_limitx = (self.tdoa_position[0]-1, self.tdoa_position[0]+1)
+            self.le_limity = (self.tdoa_position[1]-1, self.tdoa_position[1]+1)
+            self.tdoa_grid_resolution = 0.02
+
+        zlim = [self.opti_z, self.opti_z+self.tdoa_grid_resolution]
+        xys = numpy.mgrid[
+            self.le_limitx[0]:self.le_limitx[1]:self.tdoa_grid_resolution, 
+            self.le_limity[0]:self.le_limity[1]:self.tdoa_grid_resolution, 
+            zlim[0]:zlim[1]:2*self.tdoa_grid_resolution].reshape(3, -1).T
+
+
+        if (not any(self.anchor_position_flag)):
+            self.anchor_positions = numpy.array(
+                [[pos.x, pos.y, self.anchor_z[idx]] for idx, pos in enumerate(self.anchor_poses)]
+            )
+
+            err = None
+            for idx, row in enumerate(self.tdoa_measurements) : 
+                for jdx, m in enumerate(row) :
+                    if m is not None : 
+                        if err is None :
+                            err = ( m - numpy.linalg.norm((xys - self.anchor_positions[jdx]), axis=1) + numpy.linalg.norm((xys - self.anchor_positions[idx]), axis=1) ) ** 2
+                        else :
+                            err += ( m - numpy.linalg.norm((xys - self.anchor_positions[jdx]), axis=1) + numpy.linalg.norm((xys - self.anchor_positions[idx]), axis=1) ) ** 2
+
+            min_err_idx = numpy.argmin(err)
+            min_err = err[min_err_idx]
+            min_err_pos = xys[min_err_idx]
+
+            self.tdoa_position = min_err_pos 
+            calculated_pos = self._fill_posestamped(min_err_pos)
+            self.tdoa_publisher.publish(calculated_pos)
+
+            if(self.verbose):
+                rospy.loginfo("Tag position: {} with error {}, calculated in {} seconds.".format(min_err_pos, min_err, time.time() - start_stamp))
+        else:
+            rospy.logerr("Some anchor positions not received")
+
+    def run(self) :
+        '''
+            Create timer to update positions.
+        '''
+
+        time.sleep(1)
+        rospy_check_rate = rospy.Rate(10.0)
+        self.tdoa_timer = rospy.Timer(rospy.Duration(0.2), self.calculate_tdoa_position)
+       
+        rospy.loginfo("Starting TDoA Position Calculations...")
+        try:
+
+            while not rospy.is_shutdown() :             
+                rospy_check_rate.sleep()
+
+        except KeyboardInterrupt :
+            rospy.logerr('Keyboard Interrupt detected!')
+
+        self.tdoa_timer.shutdown()
+
+if __name__ == '__main__':
+    '''
+        Run the node
+    '''
+
+    position_calculator = UWBTDoAPositioning()
+
+    try:
+        time.sleep(3)
+        position_calculator.run()
+        pass
+
+    except rospy.ROSInterruptException:
+        position_calculator.filter_timer.shutdown()
+        rospy.loginfo("UWB Multilateral Position Calculation Stopped.")
