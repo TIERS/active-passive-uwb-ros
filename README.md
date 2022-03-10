@@ -1,7 +1,7 @@
 # active-passive-uwb-ros
 ROS Nodes for active (ToF) and passive (TDoA) localization using UWB modules
 
-This repo utilizes the ToF and TDoA information of nodes with active and passive UWB tags, based on the firmware by 'XXXXXXXX'. The code has been teste under Ubuntu 18.04/ROS Melodic only.
+This repo utilizes the ToF and TDoA information of nodes with active and passive UWB tags, based on the firmware by 'https://github.com/TIERS/dynamic-uwb-firmware'. The code has been teste under Ubuntu 18.04/ROS Melodic only.
 
 ## Installation
 
@@ -33,7 +33,7 @@ catkin build
 
 ## Get Started
 
-Follow the steps in XXXXXXX to setup a UWB system with at least 4 active tag and 2 passve tag. 
+Follow the steps in https://github.com/TIERS/dynamic-uwb-firmware to setup a UWB system with at least 6 active tag and 1 passive tag. 
 
 ## Scripts
 
